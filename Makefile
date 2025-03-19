@@ -1,7 +1,8 @@
 CXX = g++
 CXXFLAGS = -Wall -Wextra -Werror
+OPTFLAGS = -O1
 INCLUDE = -I./src
-CXXCMD = $(CXX) $(CXXFLAGS) $(INCLUDE)
+CXXCMD = $(CXX) $(CXXFLAGS) $(OPTFLAGS) $(INCLUDE)
 
 headers = $(wildcard ./src/*.hpp)
 sources = $(wildcard ./src/*.cpp)

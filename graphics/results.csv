@@ -1,0 +1,32 @@
+Compiling with g++ -O0
+Running ./graphics/burned_probabilities_data with data ./data/1999_27j_S
+# started on Wed Mar 19 17:06:46 2025
+
+114901,86|msec|task-clock|114901856991|100,00|0|CPUs utilized
+161530832457||cycles|114901856991|100,00|1|GHz
+343448083064||instructions|114901856991|100,00|2|insn per cycle
+401263866||branch-misses|114901856991|100,00||
+Compiling with g++ -O1
+Running ./graphics/burned_probabilities_data with data ./data/1999_27j_S
+# started on Wed Mar 19 17:08:52 2025
+
+37522,39|msec|task-clock|37522394562|100,00|0|CPUs utilized
+52062161400||cycles|37522394562|100,00|1|GHz
+93794403430||instructions|37522394562|100,00|1|insn per cycle
+358456263||branch-misses|37522394562|100,00||
+Compiling with g++ -O2
+Running ./graphics/burned_probabilities_data with data ./data/1999_27j_S
+# started on Wed Mar 19 17:09:42 2025
+
+39014,14|msec|task-clock|39014144230|100,00|0|CPUs utilized
+52727007514||cycles|39014144230|100,00|1|GHz
+93249521788||instructions|39014144230|100,00|1|insn per cycle
+358113796||branch-misses|39014144230|100,00||
+Compiling with g++ -O3
+Running ./graphics/burned_probabilities_data with data ./data/1999_27j_S
+# started on Wed Mar 19 17:10:32 2025
+
+37508,70|msec|task-clock|37508703966|100,00|0|CPUs utilized
+50819238062||cycles|37508703966|100,00|1|GHz
+86434724149||instructions|37508703966|100,00|1|insn per cycle
+366120568||branch-misses|37508703966|100,00||
