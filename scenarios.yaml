@@ -1,0 +1,27 @@
+cases:
+  - compiler: g++
+    default_opts:
+      - -march=native
+      - -Wall 
+      - -Wextra 
+      - -Werror
+    optimizations:
+      - -O0
+      - -O1
+      - -O2
+      - -O3
+  - compiler: clang++
+    default_opts:
+      - -march=native
+      - -Wall 
+      - -Wextra 
+      - -Werror
+    optimizations:
+      - -O0
+      - -O1
+      - -O2
+      - -O3
+  
+      
+data:
+  - ./data/1999_27j_S

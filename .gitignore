@@ -8,3 +8,7 @@ graphics/*.mp4
 
 data/
 data.zip
+
+*.png
+
+binaries/*
