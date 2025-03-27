@@ -12,3 +12,4 @@ data.zip
 *.png
 
 binaries/*
+perf.*
