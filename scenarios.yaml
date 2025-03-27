@@ -21,6 +21,17 @@ cases:
       - -O1
       - -O2
       - -O3
+  - compiler: icpx
+    default_opts:
+      - -march=native
+      - -Wall 
+      - -Wextra 
+      - -Werror
+    optimizations:
+      - -O0
+      - -O1
+      - -O2
+      - -O3
   
       
 data:
