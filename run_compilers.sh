@@ -23,10 +23,10 @@ for ((i=0; i<$num_cases; i++)); do
             binary_name="${bin}_${compiler}_${optimization// /_}"
             make clean >/dev/null 2>&1
             echo "Compiling with $compiler $optimization ${extraOpts[*]}"
-            make CXX=$compiler CXXFLAGS="${extraOpts[*]}" OPTFLAGS="$optimization" BINARY_NAME="$binary_name"
+            make specific CXX=$compiler CXXFLAGS="${extraOpts[*]}" OPTFLAGS="$optimization" BINARY_NAME="$binary_name"
             
             # Move binary to binaries directory
-            mv "./graphics/$binary_name" "$binaries_dir/"
+            # mv "./graphics/$binary_name" "$binaries_dir/"
             if [ ! -f "$binaries_dir/$binary_name" ]; then
                 echo "Error: Binary $binary_name was not created"
                 exit 1
