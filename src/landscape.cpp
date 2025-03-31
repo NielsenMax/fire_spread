@@ -1,7 +1,7 @@
 #include "landscape.hpp"
 
-#include <fstream>
 #include <cstddef>
+#include <fstream>
 #include <string>
 
 Landscape::Landscape(size_t width, size_t height)
@@ -42,19 +42,19 @@ Landscape::Landscape(std::string metadata_filename, std::string data_filename) :
         throw std::runtime_error("Invalid landscape file");
       }
       if (atoi((*loop_csv)[0].data()) == 1) {
-        cells[{i, j}].vegetation_type = SUBALPINE;
+        cells(i, j).vegetation_type = SUBALPINE;
       } else if (atoi((*loop_csv)[1].data()) == 1) {
-        cells[{i, j}].vegetation_type = WET;
+        cells(i, j).vegetation_type = WET;
       } else if (atoi((*loop_csv)[2].data()) == 1) {
-        cells[{i, j}].vegetation_type = DRY;
+        cells(i, j).vegetation_type = DRY;
       } else {
-        cells[{i, j}].vegetation_type = MATORRAL;
+        cells(i, j).vegetation_type = MATORRAL;
       }
-      cells[{i, j}].fwi = atof((*loop_csv)[3].data());
-      cells[{i, j}].aspect = atof((*loop_csv)[4].data());
-      cells[{i, j}].wind_direction = atof((*loop_csv)[5].data());
-      cells[{i, j}].elevation = atof((*loop_csv)[6].data());
-      cells[{i, j}].burnable = atoi((*loop_csv)[7].data());
+      cells(i, j).fwi = atof((*loop_csv)[3].data());
+      cells(i, j).aspect = atof((*loop_csv)[4].data());
+      cells(i, j).wind_direction = atof((*loop_csv)[5].data());
+      cells(i, j).elevation = atof((*loop_csv)[6].data());
+      cells(i, j).burnable = atoi((*loop_csv)[7].data());
     }
   }
 
@@ -62,9 +62,9 @@ Landscape::Landscape(std::string metadata_filename, std::string data_filename) :
 }
 
 Cell Landscape::operator[](std::pair<size_t, size_t> index) const {
-  return cells[index];
+  return cells(index.first, index.second);
 }
 
 Cell& Landscape::operator[](std::pair<size_t, size_t> index) {
-  return cells[index];
+  return cells(index.first, index.second);
 }

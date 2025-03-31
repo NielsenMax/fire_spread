@@ -19,6 +19,6 @@ struct SimulationParams {
 
 Fire simulate_fire(
     const Landscape& landscape, const std::vector<std::pair<size_t, size_t>>& ignition_cells,
-    SimulationParams params, double distance, double elevation_mean, double elevation_sd,
+    const SimulationParams& params, double distance, double elevation_mean, double elevation_sd,
     double upper_limit
 );

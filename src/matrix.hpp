@@ -1,75 +1,81 @@
 #pragma once
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 template <typename T> struct Matrix {
-  size_t width;
-  size_t height;
+  size_t width, height;
+  std::vector<T> elems;
 
-  Matrix(size_t width, size_t height) : width(width), height(height), elems(width * height){};
+  Matrix(size_t width, size_t height)
+      : width(width), height(height), elems(width * height, T{}) {}
 
-  const T operator[](std::pair<size_t, size_t> index) const {
-    return elems[index.second * width + index.first];
-  };
+  inline size_t index(size_t x, size_t y) const {
+    return y * width + x;
+  }
 
-  T& operator[](std::pair<size_t, size_t> index) {
-    return elems[index.second * width + index.first];
-  };
+  const T& operator()(size_t x, size_t y) const {
+    return elems[index(x, y)];
+  }
+
+  T& operator()(size_t x, size_t y) {
+    return elems[index(x, y)];
+  }
 
   bool operator==(const Matrix& other) const {
-    if (width != other.width || height != other.height) {
-      return false;
-    }
-
-    for (size_t i = 0; i < width * height; i++) {
-      if (elems[i] != other.elems[i]) {
-        return false;
-      }
-    }
-
-    return true;
-  };
-
-  std::vector<T> elems;
+    return width == other.width && height == other.height &&
+           std::equal(elems.begin(), elems.end(), other.elems.begin());
+  }
 };
 
+// Optimized specialization for bool matrix
 template <> struct Matrix<bool> {
-  size_t width;
-  size_t height;
+  size_t width, height;
+  std::vector<std::byte> elems; // Store 8 bools per byte
 
-  Matrix(size_t width, size_t height) : width(width), height(height), elems(width * height){};
+  Matrix(size_t width, size_t height)
+      : width(width), height(height), elems((width * height + 7) / 8, std::byte{ 0 }) {}
 
-  bool operator[](std::pair<size_t, size_t> index) const {
-    return elems[index.second * width + index.first];
-  };
+  inline size_t index(size_t x, size_t y) const {
+    return y * width + x;
+  }
+
+  inline size_t byte_index(size_t idx) const {
+    return idx / 8;
+  }
+
+  inline uint8_t bit_index(size_t idx) const {
+    return 1 << (idx % 8);
+  }
+
+  bool operator()(size_t x, size_t y) const {
+    size_t idx = index(x, y);
+    return static_cast<uint8_t>(elems[byte_index(idx)]) & bit_index(idx);
+  }
 
   struct SmartReference {
-    std::vector<bool>& values;
-    size_t index;
+    std::vector<std::byte>& values;
+    size_t idx;
+
     operator bool() const {
-      return values[index];
+      return static_cast<uint8_t>(values[idx / 8]) & (1 << (idx % 8));
     }
-    SmartReference& operator=(bool const& other) {
-      values[index] = other;
+
+    SmartReference& operator=(bool val) {
+      if (val)
+        values[idx / 8] |= static_cast<std::byte>(1 << (idx % 8));
+      else
+        values[idx / 8] &= static_cast<std::byte>(~(1 << (idx % 8)));
       return *this;
     }
   };
 
-  SmartReference operator[](std::pair<size_t, size_t> index) {
-    return SmartReference{ elems, index.second * width + index.first };
+  SmartReference operator()(size_t x, size_t y) {
+    return { elems, index(x, y) };
   }
 
   bool operator==(const Matrix& other) const {
-    if (width != other.width || height != other.height) {
-      return false;
-    }
-
-    for (size_t i = 0; i < width * height; i++) {
-      if (elems[i] != other.elems[i]) {
-        return false;
-      }
-    }
-
-    return true;
-  };
-
-  std::vector<bool> elems;
+    return width == other.width && height == other.height && elems == other.elems;
+  }
 };

@@ -29,7 +29,7 @@ Fire read_fire(size_t width, size_t height, std::string filename) {
     if (x >= width || y >= height) {
       throw std::runtime_error("Invalid fire file");
     }
-    burned_layer[{ x, y }] = true;
+    burned_layer(x, y) = true;
     burned_ids.push_back({ x, y });
   }
 

@@ -33,9 +33,7 @@ int main(int argc, char* argv[]) {
     IgnitionCells ignition_cells =
         read_ignition_cells(landscape_file_prefix + "-ignition_points.csv");
 
-    SimulationParams params = {
-      0, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2
-    };
+    SimulationParams params = { 0, 0.5, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2 };
 
     Matrix<size_t> burned_amounts = burned_amounts_per_cell(
         landscape, ignition_cells, params, DISTANCE, ELEVATION_MEAN, ELEVATION_SD, UPPER_LIMIT,
@@ -48,7 +46,7 @@ int main(int argc, char* argv[]) {
         if (j != 0) {
           std::cout << " ";
         }
-        std::cout << burned_amounts[{j, i}];
+        std::cout << burned_amounts(j, i);
       }
       std::cout << std::endl;
     }
