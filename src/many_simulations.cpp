@@ -3,8 +3,8 @@
 
 Matrix<size_t> burned_amounts_per_cell(
     const Landscape& landscape, const std::vector<std::pair<size_t, size_t>>& ignition_cells,
-    SimulationParams params, double distance, double elevation_mean, double elevation_sd,
-    double upper_limit, size_t n_replicates
+    SimulationParams params, float distance, float elevation_mean, float elevation_sd,
+    float upper_limit, size_t n_replicates
 ) {
   Matrix<size_t> burned_amounts(landscape.width, landscape.height);
 

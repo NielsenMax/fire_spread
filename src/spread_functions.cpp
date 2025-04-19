@@ -2,6 +2,7 @@
 
 #define _USE_MATH_DEFINES
 #include <cmath>
+#include <math.h>
 #include <queue>
 #include <random>
 #include <unordered_map>
@@ -11,8 +12,8 @@
 #include "landscape.hpp"
 
 /* minimax approximation to cos on [-pi/4, pi/4] with rel. err. ~= 7.5e-13 */
-double cos_core(double x) {
-  double x8, x4, x2;
+float cos_core(float x) {
+  float x2, x4, x8;
   x2 = x * x;
   x4 = x2 * x2;
   x8 = x4 * x4;
@@ -23,25 +24,25 @@ double cos_core(double x) {
 }
 
 // Fast exp(-x) approximation (Schraudolph)
-inline double fast_exp(double x) {
-  return std::pow(2.0, 1.4426950408889634 * x);
+inline float fast_exp(float x) {
+  return powf(2.0f, 1.4426950408889634f * x);
 }
 
-double spread_probability(
-    const Cell& burning, const Cell& neighbour, const SimulationParams& params, double angle,
-    double distance, double elevation_mean, double inv_elevation_sd, double upper_limit = 1.0
+float spread_probability(
+    const Cell& burning, const Cell& neighbour, const SimulationParams& params, float angle,
+    float distance, float elevation_mean, float inv_elevation_sd, float upper_limit = 1.0
 ) {
   // Precompute terms
-  double elevation_diff = neighbour.elevation - burning.elevation;
-  double slope_term = elevation_diff / distance;
-  double wind_term = cos_core(angle - burning.wind_direction);
-  double elev_term = (neighbour.elevation - elevation_mean) * inv_elevation_sd;
+  float elevation_diff = neighbour.elevation - burning.elevation;
+  float slope_term = elevation_diff / distance;
+  float wind_term = cos_core(angle - burning.wind_direction);
+  float elev_term = (neighbour.elevation - elevation_mean) * inv_elevation_sd;
 
   // Base linear predictor
-  double linpred = params.independent_pred;
+  float linpred = params.independent_pred;
 
   // Efficient vegetation type handling
-  static const std::unordered_map<int, double> vegetation_map = {
+  static const std::unordered_map<int, float> vegetation_map = {
     { SUBALPINE, params.subalpine_pred }, { WET, params.wet_pred }, { DRY, params.dry_pred }
   };
 
@@ -59,21 +60,26 @@ double spread_probability(
   return upper_limit / (1.0 + fast_exp(-linpred));
 }
 
+constexpr float angles[8] = { M_PI * 3 / 4, M_PI, M_PI * 5 / 4, M_PI / 2, M_PI * 3 / 2,
+                              M_PI / 4,     0,    M_PI * 7 / 4 };
+constexpr int moves[8][2] = { { -1, -1 }, { -1, 0 }, { -1, 1 }, { 0, -1 },
+                              { 0, 1 },   { 1, -1 }, { 1, 0 },  { 1, 1 } };
+
+// Static random number generator
+static std::random_device rd;
+static std::mt19937 gen(rd());
+std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
 Fire simulate_fire(
     const Landscape& landscape, const std::vector<std::pair<size_t, size_t>>& ignition_cells,
-    const SimulationParams& params, double distance, double elevation_mean, double elevation_sd,
-    double upper_limit = 1.0
+    const SimulationParams& params, float distance, float elevation_mean, float elevation_sd,
+    float upper_limit = 1.0
 ) {
   const size_t n_row = landscape.height;
   const size_t n_col = landscape.width;
 
-  constexpr double angles[8] = { M_PI * 3 / 4, M_PI, M_PI * 5 / 4, M_PI / 2, M_PI * 3 / 2,
-                                 M_PI / 4,     0,    M_PI * 7 / 4 };
-  constexpr int moves[8][2] = { { -1, -1 }, { -1, 0 }, { -1, 1 }, { 0, -1 },
-                                { 0, 1 },   { 1, -1 }, { 1, 0 },  { 1, 1 } };
-
   // Precompute 1/elevation_sd
-  double inv_elevation_sd = 1.0 / elevation_sd;
+  float inv_elevation_sd = 1.0f / elevation_sd;
 
   // Initialize burned cells tracking
   std::vector<std::pair<size_t, size_t>> burned_ids;
@@ -89,11 +95,6 @@ Fire simulate_fire(
   }
 
   std::vector<size_t> burned_ids_steps = { ignition_cells.size() };
-
-  // Static random number generator
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  std::uniform_real_distribution<double> dist(0.0, 1.0);
 
   // Fire spread simulation using BFS-like queue
   while (!fire_front.empty()) {
@@ -117,7 +118,7 @@ Fire simulate_fire(
         if (!neighbor_cell.burnable)
           continue;
 
-        double prob = spread_probability(
+        float prob = spread_probability(
             burning_cell, neighbor_cell, params, angles[n], distance, elevation_mean,
             inv_elevation_sd, upper_limit
         );

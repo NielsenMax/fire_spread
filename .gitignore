@@ -1,4 +1,5 @@
 *.o
+*.optrpt
 
 graphics/burned_probabilities_data
 graphics/fire_animation_data
