@@ -43,7 +43,7 @@ FireStats get_fire_stats(const Fire& fire, const Landscape& landscape) {
   FireStats stats = { 0, 0, 0, 0 };
 
   for (auto [x, y] : fire.burned_ids) {
-    Cell cell = landscape[{ x, y }];
+    Cell cell = landscape.get_cell_data(x, y);
 
     if (cell.vegetation_type == SUBALPINE) {
       stats.counts_veg_subalpine++;

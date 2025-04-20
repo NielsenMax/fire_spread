@@ -1,5 +1,5 @@
 CXX = icpx
-CXXFLAGS = -Wall -Wextra -Werror -march=native
+CXXFLAGS = -Wall -Wextra -Werror -march=native -qopenmp
 OPTFLAGS = -O3 -qopt-report=3
 INCLUDE = -I./src
 CXXCMD = $(CXX) $(CXXFLAGS) $(OPTFLAGS) $(INCLUDE)
