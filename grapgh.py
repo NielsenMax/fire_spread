@@ -6,7 +6,7 @@ import os # To check file existence
 
 # --- Configuration ---
 # <<< IMPORTANT: Change this to the actual path of your CSV file >>>
-CSV_FILE_PATH = 'joined.csv'
+CSV_FILE_PATH = 'joined2.csv'
 
 # --- Validate File Path ---
 if not os.path.exists(CSV_FILE_PATH):

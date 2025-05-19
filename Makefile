@@ -1,6 +1,6 @@
-CXX = icpx
-CXXFLAGS = -Wall -Wextra -Werror -march=native -qopenmp
-OPTFLAGS = -O3 -qopt-report=3
+CXX = g++
+CXXFLAGS = -Wall -Wextra -Werror -march=native -fopenmp -fPIE -fPIC
+OPTFLAGS = -O3
 INCLUDE = -I./src
 CXXCMD = $(CXX) $(CXXFLAGS) $(OPTFLAGS) $(INCLUDE)
 BINARY_NAME ?= burned_probabilities_data
