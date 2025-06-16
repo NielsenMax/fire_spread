@@ -1,22 +1,17 @@
-// spread_functions.cpp  (Hybrid BFS / full-grid, OpenMP-parallelized)
-
 #include "spread_functions.hpp"
+#include "random_pool.hpp"
 
 #define _USE_MATH_DEFINES
-#include <algorithm>
-#include <cassert>
+#include <algorithm> // For std::sort
+#include <array>     // For std::array
 #include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <immintrin.h>
-#include <omp.h>
+#include <cstdint> // For uint8_t
 #include <random>
-#include <utility>
 #include <vector>
 
 #include "fires.hpp"
-#include "landscape.hpp" // SoA Landscape
-#include "matrix.hpp"    // Matrix<T>, including Matrix<bool>
+#include "landscape.hpp"
+#include "omp.h"
 
 // --- AVX2 Helper Functions ---
 inline __m256 cos_core_vec(__m256 x) {
@@ -54,346 +49,289 @@ inline __m256 fast_exp_neg_poly_vec(__m256 x) {
   return _mm256_fmadd_ps(r, y, c0);
 }
 
-// --- Constants ---
-constexpr float angles[8] __attribute__((aligned(32))
-) = { M_PI * 3 / 4, M_PI, M_PI * 5 / 4, M_PI / 2, M_PI * 3 / 2, M_PI / 4, 0.0f, M_PI * 7 / 4 };
-constexpr int moves_flat[16]
-    __attribute__((aligned(32))) = { -1, -1, -1, 0, -1, 1, 0, -1, 0, 1, 1, -1, 1, 0, 1, 1 };
+Fire simulate_fire(
+    const Landscape& landscape, const std::vector<std::pair<size_t, size_t>>& ignition_cells,
+    SimulationParams params, float distance, float elevation_mean, float elevation_sd,
+    float upper_limit = 1.0f
+) {
+  // RandomPool random_pool; // Will be created per thread
 
-// --- RandomPool (one per thread) ---
-class RandomPool {
-  static constexpr size_t POOL_SIZE = 1024;
-  std::vector<float> rnd;
-  size_t idx = 0;
+  size_t n_row = landscape.height;
+  size_t n_col = landscape.width;
 
-public:
-  RandomPool() : rnd(POOL_SIZE), idx(0) {
-    std::mt19937 gen{ std::random_device{}() };
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    for (auto& v : rnd)
-      v = dist(gen);
-  }
-  inline float get() {
-    float v = rnd[idx];
-    idx = (idx + 1) & (POOL_SIZE - 1);
-    return v;
-  }
-  inline void get_batch(float* out, size_t n) {
-    for (size_t i = 0; i < n; ++i)
-      out[i] = get();
-  }
-  void refill() {
-    if (idx > POOL_SIZE / 2) {
-      std::mt19937 gen{ std::random_device{}() };
-      std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-      for (auto& v : rnd)
-        v = dist(gen);
-      idx = 0;
-    }
-  }
-};
-static thread_local RandomPool random_pool;
-
-// --- BurnedCellsTracker (flat, atomic) ---
-struct BurnedCellsTracker {
-  size_t width, height;
-  std::vector<char> burned_bin; // 0/1 flags
   std::vector<std::pair<size_t, size_t>> burned_ids;
-  std::vector<size_t> burned_ids_steps;
+  burned_ids.reserve(n_row * n_col);
 
-  BurnedCellsTracker(size_t w, size_t h) : width(w), height(h), burned_bin(w * h, 0) {
-    burned_ids.reserve(w * h / 10);
+  for (const auto& cell : ignition_cells) {
+    burned_ids.push_back(cell);
+  }
+
+  std::vector<size_t> burned_ids_steps;
+  if (!ignition_cells.empty()) {
+    burned_ids_steps.push_back(burned_ids.size());
+  } else {
     burned_ids_steps.push_back(0);
   }
 
-  void add_cell_seq(size_t x, size_t y) {
-    size_t i = y * width + x;
-    if (!burned_bin[i]) {
-      burned_bin[i] = 1;
-      burned_ids.emplace_back(x, y);
+  Matrix<bool> burned_bin(n_col, n_row); // Using Matrix<bool> specialization
+  // Initialize burned_bin to false (0)
+  // The Matrix<bool> constructor with std::vector<bool> elems(width*height) initializes to false.
+  // If using bitmask version, ensure it initializes to 0.
+  // For std::vector<bool>, direct fill might be needed if constructor doesn't guarantee false.
+  // Assuming Matrix<bool> default constructor or its `elems` init to false.
+  // If not, add: std::fill(burned_bin.elems.begin(), burned_bin.elems.end(), false);
+  // Or if using the bitmask version: burned_bin.fill(false);
+
+  for (const auto& cell : ignition_cells) {
+    if (cell.first < n_col && cell.second < n_row) {
+      burned_bin[cell] = true;
     }
   }
 
-  bool try_mark_burn(size_t x, size_t y) {
-    size_t i = y * width + x;
-    char expected = 0;
-    return __atomic_compare_exchange_n(
-        &burned_bin[i], &expected, char(1),
-        /*weak=*/false, __ATOMIC_RELAXED, __ATOMIC_RELAXED
-    );
-  }
-};
+  size_t start = 0;
+  // 'end' will now represent the count of cells processed in the current step's burned_ids list.
+  // The actual end of burned_ids vector will grow.
+  size_t current_step_burning_count = ignition_cells.size();
 
-// --- Spread Probability Calculation (Explicit AVX2 Intrinsics) ---
-// Replaces the #pragma omp simd version
-void spread_probability_vectorized_intrinsics(
-    float burning_elevation_param, float burning_wind_direction_param,
-    const float* neighbor_elevations, const uint8_t* neighbor_veg_types_uint8,
-    const float* neighbor_fwis, const float* neighbor_aspects, const SimulationParams& params,
-    const float* angles_arg, float distance, float elevation_mean, float inv_elevation_sd,
-    float* probabilities,   // Output
-    const bool* valid_mask, // Still need mask for conditional store/blend
-    int n, float upper_limit = 1.0
-) {
-  // Constants as vectors
-  const __m256 vec_upper_limit = _mm256_set1_ps(upper_limit);
-  const __m256 vec_one = _mm256_set1_ps(1.0f);
-  const __m256 vec_zero = _mm256_setzero_ps();
-  const __m256 vec_burning_elevation = _mm256_set1_ps(burning_elevation_param);
-  const __m256 vec_burning_wind_dir = _mm256_set1_ps(burning_wind_direction_param);
-  const __m256 vec_elevation_mean = _mm256_set1_ps(elevation_mean);
-  const __m256 vec_inv_elevation_sd = _mm256_set1_ps(inv_elevation_sd);
-  const __m256 vec_distance = _mm256_set1_ps(distance);
-  const __m256 vec_independent_pred = _mm256_set1_ps(params.independent_pred);
-  const __m256 vec_subalpine_pred = _mm256_set1_ps(params.subalpine_pred);
-  const __m256 vec_wet_pred = _mm256_set1_ps(params.wet_pred);
-  const __m256 vec_dry_pred = _mm256_set1_ps(params.dry_pred);
-  const __m256 vec_matorral_pred = _mm256_setzero_ps(); // Assuming 0 for Matorral
-  const __m256 vec_fwi_pred = _mm256_set1_ps(params.fwi_pred);
-  const __m256 vec_aspect_pred = _mm256_set1_ps(params.aspect_pred);
-  const __m256 vec_wind_pred = _mm256_set1_ps(params.wind_pred);
-  const __m256 vec_elevation_pred = _mm256_set1_ps(params.elevation_pred);
-  const __m256 vec_slope_pred = _mm256_set1_ps(params.slope_pred);
-  const __m256 vec_inv_distance =
-      (distance != 0.0f) ? _mm256_div_ps(vec_one, vec_distance) : vec_zero;
+  constexpr int moves[2][8] = { { -1, -1, -1, 0, 0, 1, 1, 1 }, { -1, 0, 1, -1, 1, -1, 0, 1 } };
+  alignas(32) constexpr float angles[8] = {
+    M_PI * 3.0f / 4.0f, M_PI, M_PI * 5.0f / 4.0f, M_PI / 2.0f, M_PI * 3.0f / 2.0f,
+    M_PI / 4.0f,        0.0f, M_PI * 7.0f / 4.0f
+  };
 
-  assert(n == 8 && "This intrinsic version assumes n=8");
+  float inv_elevation_sd = (elevation_sd != 0.0f) ? 1.0f / elevation_sd : 0.0f;
 
-  // Load validity mask (bool[8] -> int[8] -> __m256i -> __m256)
-  alignas(32) int valid_int_mask[8];
-  for (int i = 0; i < 8; ++i)
-    valid_int_mask[i] = valid_mask[i] ? -1 : 0;
-  __m256i vec_valid_mask_i = _mm256_load_si256((const __m256i*)valid_int_mask);
-  __m256 vec_valid_mask = _mm256_castsi256_ps(vec_valid_mask_i);
+  // --- AVX Constants (remains the same) ---
+  const __m256 v_inv_dist =
+      (distance != 0.0f) ? _mm256_set1_ps(1.0f / distance) : _mm256_setzero_ps();
+  const __m256 v_elev_mean = _mm256_set1_ps(elevation_mean);
+  const __m256 v_inv_elev_sd = _mm256_set1_ps(inv_elevation_sd);
+  const __m256 v_upper_limit = _mm256_set1_ps(upper_limit);
+  const __m256 v_one = _mm256_set1_ps(1.0f);
+  // const __m256 v_zero = _mm256_setzero_ps();
+  const __m256i v_minus_one_i = _mm256_set1_epi32(-1);
+  const __m256i v_bounds_x = _mm256_set1_epi32(n_col);
+  const __m256i v_bounds_y = _mm256_set1_epi32(n_row);
+  const __m256 v_angles = _mm256_load_ps(angles);
 
-  // Load neighbor data (use aligned loads as source uses __attribute__)
-  __m256 vec_neighbor_elev = _mm256_load_ps(neighbor_elevations);
-  __m256 vec_neighbor_fwi = _mm256_load_ps(neighbor_fwis);
-  __m256 vec_neighbor_aspect = _mm256_load_ps(neighbor_aspects);
-  __m256 vec_angles = _mm256_load_ps(angles_arg);
-  __m128i veg_types_low = _mm_loadl_epi64((const __m128i*)neighbor_veg_types_uint8);
-  __m256i vec_veg_types_i = _mm256_cvtepu8_epi32(veg_types_low);
+  const __m256 v_param_indep = _mm256_set1_ps(params.independent_pred);
+  const __m256 v_param_suba = _mm256_set1_ps(params.subalpine_pred);
+  const __m256 v_param_wet = _mm256_set1_ps(params.wet_pred);
+  const __m256 v_param_dry = _mm256_set1_ps(params.dry_pred);
+  const __m256 v_param_fwi = _mm256_set1_ps(params.fwi_pred);
+  const __m256 v_param_aspect = _mm256_set1_ps(params.aspect_pred);
+  const __m256 v_param_wind = _mm256_set1_ps(params.wind_pred);
+  const __m256 v_param_elev = _mm256_set1_ps(params.elevation_pred);
+  const __m256 v_param_slope = _mm256_set1_ps(params.slope_pred);
 
-  // --- Start Calculations ---
-  __m256 vec_elev_diff = _mm256_sub_ps(vec_neighbor_elev, vec_burning_elevation);
-  __m256 vec_slope_term = _mm256_mul_ps(vec_elev_diff, vec_inv_distance);
-  __m256 vec_angle_diff = _mm256_sub_ps(vec_angles, vec_burning_wind_dir);
-  __m256 vec_wind_term = cos_core_vec(vec_angle_diff);
-  __m256 vec_elev_term_tmp = _mm256_sub_ps(vec_neighbor_elev, vec_elevation_mean);
-  __m256 vec_elev_term = _mm256_mul_ps(vec_elev_term_tmp, vec_inv_elevation_sd);
-  __m256 vec_linpred = vec_independent_pred;
+  // Temporary storage arrays are now declared inside the parallel region or made thread-private if needed.
+  // However, they are small and used per-iteration of the 'b' loop, so they can be stack-allocated within the loop
+  // or declared inside the #pragma omp parallel block to be private by default for stack variables.
 
-  // Vegetation Type Term (blends)
-  __m256i vec_veg_subalpine = _mm256_set1_epi32(SUBALPINE);
-  __m256i vec_veg_wet = _mm256_set1_epi32(WET);
-  __m256i vec_veg_dry = _mm256_set1_epi32(DRY);
-  __m256i mask_subalpine = _mm256_cmpeq_epi32(vec_veg_types_i, vec_veg_subalpine);
-  __m256i mask_wet = _mm256_cmpeq_epi32(vec_veg_types_i, vec_veg_wet);
-  __m256i mask_dry = _mm256_cmpeq_epi32(vec_veg_types_i, vec_veg_dry);
-  __m256 mask_subalpine_f = _mm256_castsi256_ps(mask_subalpine);
-  __m256 mask_wet_f = _mm256_castsi256_ps(mask_wet);
-  __m256 mask_dry_f = _mm256_castsi256_ps(mask_dry);
-  __m256 veg_term = vec_matorral_pred; // Start with default (0)
-  veg_term = _mm256_blendv_ps(veg_term, vec_subalpine_pred, mask_subalpine_f);
-  veg_term = _mm256_blendv_ps(veg_term, vec_wet_pred, mask_wet_f);
-  veg_term = _mm256_blendv_ps(veg_term, vec_dry_pred, mask_dry_f);
-  vec_linpred = _mm256_add_ps(vec_linpred, veg_term);
-
-  // Add other terms using FMA
-  vec_linpred = _mm256_fmadd_ps(vec_fwi_pred, vec_neighbor_fwi, vec_linpred);
-  vec_linpred = _mm256_fmadd_ps(vec_aspect_pred, vec_neighbor_aspect, vec_linpred);
-  vec_linpred = _mm256_fmadd_ps(vec_wind_term, vec_wind_pred, vec_linpred);
-  vec_linpred = _mm256_fmadd_ps(vec_elev_term, vec_elevation_pred, vec_linpred);
-  vec_linpred = _mm256_fmadd_ps(vec_slope_term, vec_slope_pred, vec_linpred);
-
-  // Calculate probability
-  __m256 vec_exp_term = fast_exp_neg_poly_vec(vec_linpred);
-  __m256 vec_denominator = _mm256_add_ps(vec_one, vec_exp_term);
-  __m256 vec_prob_raw = _mm256_div_ps(vec_upper_limit, vec_denominator);
-
-  // Apply validity mask
-  __m256 vec_prob_final = _mm256_and_ps(vec_prob_raw, vec_valid_mask);
-
-  // Store results (use aligned store as probabilities should be aligned in neighbor_data)
-  _mm256_store_ps(probabilities, vec_prob_final);
-}
-// --- End Spread Probability ---
-
-// --- Main Simulation Function ---
-Fire simulate_fire(
-    const Landscape& landscape, const std::vector<std::pair<size_t, size_t>>& ignition_cells,
-    const SimulationParams& params, float distance, float elevation_mean, float elevation_sd,
-    float upper_limit /*=1.0f*/
-) {
-  const size_t n_row = landscape.height;
-  const size_t n_col = landscape.width;
-  const float inv_elev_sd = elevation_sd > 0.0f ? 1.0f / elevation_sd : 0.0f;
-
-  BurnedCellsTracker burned_tracker(n_col, n_row);
-
-  // --- initialize ignition level (single-threaded) ---
-  std::vector<std::pair<size_t, size_t>> current_level;
-  current_level.reserve(n_row * n_col / 10);
-  std::vector<char> ignition_added(n_col * n_row, 0);
-
-  for (auto [x, y] : ignition_cells) {
-    if (x < n_col && y < n_row && landscape.is_burnable(x, y)) {
-      size_t idx = y * n_col + x;
-      if (!ignition_added[idx]) {
-        burned_tracker.add_cell_seq(x, y);
-        current_level.emplace_back(x, y);
-        ignition_added[idx] = 1;
-      }
-    }
-  }
-
-  // --- time‐step loop ---
-  while (!current_level.empty()) {
-    std::vector<std::pair<size_t, size_t>> next_level;
-    next_level.reserve(current_level.size());
-    size_t new_burned = 0;
+  while (current_step_burning_count > 0) {
+    size_t end_of_current_step_processing = start + current_step_burning_count;
+    std::vector<std::pair<size_t, size_t>> all_newly_ignited_coords_for_this_step;
+    // Pre-allocate based on a heuristic, e.g., max 8 * number of burning cells
+    all_newly_ignited_coords_for_this_step.reserve(current_step_burning_count * 8);
 
 #pragma omp parallel
     {
-      // per-thread neighbor SoA
-      struct Neigh {
-        alignas(32) float elev[8];
-        uint8_t veg[8]; // Alignment for this is less critical for _mm_loadl_epi64
-        alignas(32) float fwi[8];
-        alignas(32) float asp[8];
-        alignas(32) float ang[8];
-        bool val[8]; // Not directly loaded into __m256 with aligned load
-        alignas(32) float prob[8];
-        // int x[8], y[8] are stored with _mm256_storeu_si256 (unaligned is fine)
-        // but for consistency or if other aligned ops were used, could be aligned too.
-        // For now, focusing on the ones causing GPF with _load_ps/_store_ps.
-        int x[8];
-        int y[8];
-      } nd;
+      // Each thread gets its own RandomPool instance
+      RandomPool thread_local_random_pool;
+      // Each thread collects its newly found coordinates here
+      std::vector<std::pair<size_t, size_t>> thread_private_new_coords;
+      thread_private_new_coords.reserve(
+          8 * (current_step_burning_count / omp_get_num_threads() + 1)
+      ); // Heuristic
 
-      std::vector<std::pair<size_t, size_t>> local_next, local_burned;
-      local_next.reserve(64);
-      local_burned.reserve(64);
+      // Declare these temporary arrays here to make them private to each thread's stack
+      alignas(32) std::array<float, 8> neigh_elev;
+      alignas(32) std::array<float, 8> neigh_fwi;
+      alignas(32) std::array<float, 8> neigh_aspect;
+      alignas(32) std::array<uint8_t, 8> neigh_veg_type;
+      alignas(32) std::array<uint8_t, 8> neigh_burnable;
+      alignas(32) std::array<uint8_t, 8>
+          neigh_already_burned; // This reads from shared burned_bin
+      alignas(32) std::array<int32_t, 8> neigh_x_coords;
+      alignas(32) std::array<int32_t, 8> neigh_y_coords;
 
-#pragma omp for schedule(dynamic) reduction(+ : new_burned)
-      for (int ic = 0; ic < (int)current_level.size(); ++ic) {
-        auto [cx, cy] = current_level[ic];
-        float belev = landscape.get_elevation(cx, cy);
-        float bwind = landscape.get_wind_direction(cx, cy);
+#pragma omp for schedule(dynamic)
+      for (size_t b = start; b < end_of_current_step_processing; b++) {
+        size_t burning_cell_0 = burned_ids[b].first; // Reading from shared burned_ids
+        size_t burning_cell_1 = burned_ids[b].second;
 
-        // --- compute neighbor coords & bounds (same as original) ---
-        __m256i cxv = _mm256_set1_epi32((int)cx);
-        __m256i cyv = _mm256_set1_epi32((int)cy);
-        __m256i mx = _mm256_set_epi32(
-            moves_flat[14], moves_flat[12], moves_flat[10], moves_flat[8], moves_flat[6],
-            moves_flat[4], moves_flat[2], moves_flat[0]
-        );
-        __m256i my = _mm256_set_epi32(
-            moves_flat[15], moves_flat[13], moves_flat[11], moves_flat[9], moves_flat[7],
-            moves_flat[5], moves_flat[3], moves_flat[1]
-        );
-        __m256i nxv = _mm256_add_epi32(cxv, mx);
-        __m256i nyv = _mm256_add_epi32(cyv, my);
+        // landscape is shared const, burned_bin is shared (read-only in this parallel part)
+        const Cell& burning_cell = landscape[{ burning_cell_0, burning_cell_1 }];
 
-        _mm256_storeu_si256((__m256i*)nd.x, nxv);
-        _mm256_storeu_si256((__m256i*)nd.y, nyv);
-
-        __m256i ge0x = _mm256_cmpgt_epi32(nxv, _mm256_set1_epi32(-1));
-        __m256i ge0y = _mm256_cmpgt_epi32(nyv, _mm256_set1_epi32(-1));
-        __m256i ltX = _mm256_cmpgt_epi32(_mm256_set1_epi32((int)n_col), nxv);
-        __m256i ltY = _mm256_cmpgt_epi32(_mm256_set1_epi32((int)n_row), nyv);
-        __m256i bmask =
-            _mm256_and_si256(_mm256_and_si256(ge0x, ge0y), _mm256_and_si256(ltX, ltY));
-        int bchk[8];
-        _mm256_storeu_si256((__m256i*)bchk, bmask);
-
-        // --- fill nd.val[] & SoA if burnable & not yet burned ---
-        int valid_count = 0;
-        for (int b = 0; b < 8; ++b)
-          nd.val[b] = false;
-        for (int b = 0; b < 8; ++b) {
-          if (!bchk[b])
-            continue;
-          size_t nx = (size_t)nd.x[b], ny = (size_t)nd.y[b];
-          // only claim if the cell IS burnable; `try_mark_burn` flips 0→1 on first call
-          if (!landscape.is_burnable(nx, ny))
-            continue;
-          // we _don't_ want to mark it permanently here yet; we'll flip later if RNG decides
-          nd.val[b] = true;
-          nd.elev[b] = landscape.get_elevation(nx, ny);
-          nd.veg[b] = (uint8_t)landscape.get_vegetation_type(nx, ny);
-          nd.fwi[b] = landscape.get_fwi(nx, ny);
-          nd.asp[b] = landscape.get_aspect(nx, ny);
-          nd.ang[b] = angles[b];
-          ++valid_count;
+        // Prefetch can remain, ensure it's safe if multiple threads prefetch same/nearby data
+        if (b + 1 < end_of_current_step_processing) {
+          const Cell& next_cell =
+              landscape[{ burned_ids[b + 1].first, burned_ids[b + 1].second }];
+          _mm_prefetch((const char*)(&next_cell), _MM_HINT_T0);
         }
-        if (!valid_count)
-          continue;
 
-        // --- compute probabilities via AVX2 intrinsics ---
-        spread_probability_vectorized_intrinsics(
-            belev, bwind, nd.elev, nd.veg, nd.fwi, nd.asp, params, nd.ang, distance,
-            elevation_mean, inv_elev_sd, nd.prob, nd.val, 8, upper_limit
-        );
+        // --- Vectorized Neighbor Calculation (largely the same) ---
+        __m256i base_x = _mm256_set1_epi32(burning_cell_0);
+        __m256i base_y = _mm256_set1_epi32(burning_cell_1);
+        __m256i moves_x_vec =
+            _mm256_loadu_si256((__m256i const*)moves[0]); // Renamed to avoid conflict
+        __m256i moves_y_vec = _mm256_loadu_si256((__m256i const*)moves[1]); // Renamed
+        __m256i neighbor_x = _mm256_add_epi32(base_x, moves_x_vec);
+        __m256i neighbor_y = _mm256_add_epi32(base_y, moves_y_vec);
+        _mm256_store_si256((__m256i*)neigh_x_coords.data(), neighbor_x);
+        _mm256_store_si256((__m256i*)neigh_y_coords.data(), neighbor_y);
 
-        // --- compare to randoms & decide burns ---
-        float rnds[8];
-        random_pool.get_batch(rnds, 8);
-        __m256 probs_v = _mm256_loadu_ps(nd.prob);
-        __m256 rnd_v = _mm256_loadu_ps(rnds);
-        __m256 cmp_v = _mm256_cmp_ps(rnd_v, probs_v, _CMP_LT_OQ);
-        __m256i cmp_i = _mm256_castps_si256(cmp_v);
+        // --- Bounds Check (same) ---
+        __m256i x_gt_m1 = _mm256_cmpgt_epi32(neighbor_x, v_minus_one_i);
+        __m256i x_lt_max = _mm256_cmpgt_epi32(v_bounds_x, neighbor_x);
+        __m256i y_gt_m1 = _mm256_cmpgt_epi32(neighbor_y, v_minus_one_i);
+        __m256i y_lt_max = _mm256_cmpgt_epi32(v_bounds_y, neighbor_y);
+        __m256i in_bounds_x = _mm256_and_si256(x_gt_m1, x_lt_max);
+        __m256i in_bounds_y = _mm256_and_si256(y_gt_m1, y_lt_max);
+        __m256i v_in_bounds_mask = _mm256_and_si256(in_bounds_x, in_bounds_y);
 
-        int maskv[8];
-        for (int b = 0; b < 8; ++b)
-          maskv[b] = nd.val[b] ? -1 : 0;
-        __m256i val_i = _mm256_loadu_si256((__m256i*)maskv);
-        __m256i final = _mm256_and_si256(cmp_i, val_i);
-
-        int out[8];
-        _mm256_storeu_si256((__m256i*)out, final);
-
-        // --- for each candidate, atomically claim and record ---
-        for (int b = 0; b < 8; ++b) {
-          if (!out[b])
-            continue;
-          size_t nx = (size_t)nd.x[b], ny = (size_t)nd.y[b];
-          if (burned_tracker.try_mark_burn(nx, ny)) {
-            local_next.emplace_back(nx, ny);
-            local_burned.emplace_back(nx, ny);
-            ++new_burned;
+        // --- Gather Neighbor Data (largely same, reads from shared landscape and burned_bin) ---
+        std::fill(neigh_already_burned.begin(), neigh_already_burned.end(), 1);
+        std::fill(neigh_burnable.begin(), neigh_burnable.end(), 0);
+        int in_bounds_bitmask = _mm256_movemask_epi8(v_in_bounds_mask);
+        for (int n = 0; n < 8; ++n) {
+          if (in_bounds_bitmask & (1 << (n * 4))) {
+            int nx = neigh_x_coords[n];
+            int ny = neigh_y_coords[n];
+            const Cell& neighbour_cell = landscape[{ (size_t)nx, (size_t)ny }];
+            neigh_elev[n] = neighbour_cell.elevation;
+            neigh_fwi[n] = neighbour_cell.fwi;
+            neigh_aspect[n] = neighbour_cell.aspect;
+            neigh_veg_type[n] = static_cast<uint8_t>(neighbour_cell.vegetation_type);
+            neigh_burnable[n] = neighbour_cell.burnable ? 1 : 0;
+            neigh_already_burned[n] =
+                burned_bin[{ (size_t)nx, (size_t)ny }]; // Read from shared burned_bin
+          } else {
+            neigh_elev[n] = 0.0f;
+            neigh_fwi[n] = 0.0f;
+            neigh_aspect[n] = 0.0f;
+            neigh_veg_type[n] = 0;
           }
         }
-      } // end omp for
 
-      random_pool.refill();
+        // --- Load Gathered Data into AVX Registers (same) ---
+        __m256 v_neigh_elev = _mm256_load_ps(neigh_elev.data());
+        __m256 v_neigh_fwi = _mm256_load_ps(neigh_fwi.data());
+        __m256 v_neigh_aspect = _mm256_load_ps(neigh_aspect.data());
+        __m128i v_neigh_burnable_8bit = _mm_loadu_si64(neigh_burnable.data());
+        __m128i v_neigh_already_burned_8bit = _mm_loadu_si64(neigh_already_burned.data());
+        __m256i v_neigh_burnable_ext = _mm256_cvtepu8_epi32(v_neigh_burnable_8bit); // Renamed
+        __m256i v_neigh_already_burned_ext =
+            _mm256_cvtepu8_epi32(v_neigh_already_burned_8bit); // Renamed
+        __m256i v_is_burnable_mask =
+            _mm256_cmpeq_epi32(v_neigh_burnable_ext, _mm256_set1_epi32(1));
+        __m256i v_not_burned_mask =
+            _mm256_cmpeq_epi32(v_neigh_already_burned_ext, _mm256_setzero_si256());
+        __m256i v_valid_neighbor_mask_i =
+            _mm256_and_si256(v_in_bounds_mask, v_is_burnable_mask);
+        v_valid_neighbor_mask_i = _mm256_and_si256(v_valid_neighbor_mask_i, v_not_burned_mask);
+        __m256 v_valid_neighbor_mask = _mm256_castsi256_ps(v_valid_neighbor_mask_i);
 
+        // --- Vectorized Probability Calculation (largely same, use thread_local_random_pool) ---
+        __m256 v_burn_elev = _mm256_set1_ps(burning_cell.elevation);
+        __m256 v_burn_wind_dir = _mm256_set1_ps(burning_cell.wind_direction);
+        __m256 v_elev_diff = _mm256_sub_ps(v_neigh_elev, v_burn_elev);
+        __m256 v_slope_arg = _mm256_mul_ps(v_elev_diff, v_inv_dist);
+        __m256 v_slope_arg_sq = _mm256_mul_ps(v_slope_arg, v_slope_arg);
+        __m256 v_one_plus_slope_arg_sq = _mm256_add_ps(v_one, v_slope_arg_sq);
+        __m256 v_sqrt_term = _mm256_sqrt_ps(v_one_plus_slope_arg_sq);
+        __m256 v_slope_term = _mm256_div_ps(v_slope_arg, v_sqrt_term);
+        __m256 v_wind_arg = _mm256_sub_ps(v_angles, v_burn_wind_dir);
+        __m256 v_wind_term = cos_core_vec(v_wind_arg);
+        __m256 v_elev_term = _mm256_sub_ps(v_neigh_elev, v_elev_mean);
+        v_elev_term = _mm256_mul_ps(v_elev_term, v_inv_elev_sd);
+        __m256 v_linpred = v_param_indep;
+        __m128i v_neigh_veg_type_8bit = _mm_loadu_si64(neigh_veg_type.data());
+        __m256i v_veg_type = _mm256_cvtepu8_epi32(v_neigh_veg_type_8bit);
+        __m256i v_is_suba_mask_i = _mm256_cmpeq_epi32(v_veg_type, _mm256_set1_epi32(SUBALPINE));
+        __m256 v_is_suba_mask = _mm256_castsi256_ps(v_is_suba_mask_i);
+        v_linpred = _mm256_add_ps(v_linpred, _mm256_and_ps(v_is_suba_mask, v_param_suba));
+        __m256i v_is_wet_mask_i = _mm256_cmpeq_epi32(v_veg_type, _mm256_set1_epi32(WET));
+        __m256 v_is_wet_mask = _mm256_castsi256_ps(v_is_wet_mask_i);
+        v_linpred = _mm256_add_ps(v_linpred, _mm256_and_ps(v_is_wet_mask, v_param_wet));
+        __m256i v_is_dry_mask_i = _mm256_cmpeq_epi32(v_veg_type, _mm256_set1_epi32(DRY));
+        __m256 v_is_dry_mask = _mm256_castsi256_ps(v_is_dry_mask_i);
+        v_linpred = _mm256_add_ps(v_linpred, _mm256_and_ps(v_is_dry_mask, v_param_dry));
+        v_linpred = _mm256_fmadd_ps(v_param_fwi, v_neigh_fwi, v_linpred);
+        v_linpred = _mm256_fmadd_ps(v_param_aspect, v_neigh_aspect, v_linpred);
+        v_linpred = _mm256_fmadd_ps(v_param_wind, v_wind_term, v_linpred);
+        v_linpred = _mm256_fmadd_ps(v_param_elev, v_elev_term, v_linpred);
+        v_linpred = _mm256_fmadd_ps(v_param_slope, v_slope_term, v_linpred);
+        // __m256 v_neg_linpred = _mm256_sub_ps(v_zero, v_linpred);
+        __m256 v_exp_term = fast_exp_neg_poly_vec(v_linpred); // Corrected to natural exp
+        __m256 v_denom = _mm256_add_ps(v_one, v_exp_term);
+        __m256 v_prob = _mm256_div_ps(v_upper_limit, v_denom);
+
+        // --- Vectorized Random Check (use thread_local_random_pool) ---
+        __m256 v_random = thread_local_random_pool.get_random_avx();
+        __m256 v_burn_mask = _mm256_cmp_ps(v_random, v_prob, _CMP_LT_OQ);
+        __m256 v_final_burn_mask = _mm256_and_ps(v_valid_neighbor_mask, v_burn_mask);
+        int final_bitmask = _mm256_movemask_ps(v_final_burn_mask);
+
+        // --- Collect new cells for this thread ---
+        if (final_bitmask != 0) {
+          for (int n = 0; n < 8; ++n) {
+            if ((final_bitmask >> n) & 1) {
+              thread_private_new_coords.push_back({ (size_t)neigh_x_coords[n],
+                                                    (size_t)neigh_y_coords[n] });
+            }
+          }
+        }
+      } // End of omp for loop
+
+// --- Merge thread-private results into a shared collection ---
 #pragma omp critical
       {
-        next_level.insert(next_level.end(), local_next.begin(), local_next.end());
-        burned_tracker.burned_ids.insert(
-            burned_tracker.burned_ids.end(), local_burned.begin(), local_burned.end()
+        all_newly_ignited_coords_for_this_step.insert(
+            all_newly_ignited_coords_for_this_step.end(),
+            std::make_move_iterator(thread_private_new_coords.begin()),
+            std::make_move_iterator(thread_private_new_coords.end())
         );
       }
-    } // end omp parallel
+    } // End of omp parallel region
 
-    burned_tracker.burned_ids_steps.push_back(
-        burned_tracker.burned_ids_steps.back() + new_burned
+    // --- Post-parallel processing (single thread) ---
+    // Remove duplicates that might have been added if multiple burning cells ignite the same neighbor
+    std::sort(
+        all_newly_ignited_coords_for_this_step.begin(),
+        all_newly_ignited_coords_for_this_step.end()
     );
-    std::swap(current_level, next_level);
-  }
+    all_newly_ignited_coords_for_this_step.erase(
+        std::unique(
+            all_newly_ignited_coords_for_this_step.begin(),
+            all_newly_ignited_coords_for_this_step.end()
+        ),
+        all_newly_ignited_coords_for_this_step.end()
+    );
 
-  //
-  // --- HERE: convert flat vector<char> → Matrix<bool> ---
-  //
-  Matrix<bool> result_map(n_col, n_row);
-  for (size_t y = 0; y < n_row; ++y) {
-    for (size_t x = 0; x < n_col; ++x) {
-      size_t idx = y * n_col + x;
-      result_map(x, y) = (burned_tracker.burned_bin[idx] != 0);
+    size_t actual_new_cells_this_step = 0;
+    for (const auto& coord : all_newly_ignited_coords_for_this_step) {
+      // Final check against the global burned_bin to ensure it wasn't
+      // already burned in a *previous* time step (the parallel loop's check was against
+      // burned_bin's state *at the beginning* of the current time step).
+      if (!burned_bin[coord]) { // Check if it's truly new globally
+        burned_ids.push_back(coord);
+        burned_bin[coord] = true; // Mark it in the global grid
+        actual_new_cells_this_step++;
+      }
     }
-  }
 
-  return { n_col, n_row, std::move(result_map), std::move(burned_tracker.burned_ids),
-           std::move(burned_tracker.burned_ids_steps) };
+    start =
+        end_of_current_step_processing; // Advance start for the next iteration of the while loop
+    // 'end' is implicitly tracked by burned_ids.size()
+    current_step_burning_count =
+        actual_new_cells_this_step; // Number of cells to process in the next while loop iteration
+
+    if (actual_new_cells_this_step > 0) {
+      burned_ids_steps.push_back(burned_ids.size());
+    }
+
+  } // End while(current_step_burning_count > 0)
+
+  return { n_col, n_row, burned_bin, burned_ids, burned_ids_steps };
 }
