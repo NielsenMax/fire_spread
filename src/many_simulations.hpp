@@ -4,7 +4,7 @@
 
 #include "fires.hpp"
 #include "landscape.hpp"
-#include "spread_functions.hpp"
+#include "spread_functions.cuh"
 
 /* Make `n_replicates` simulation and return a matrix with the number of simulations each cell
  * was burned.

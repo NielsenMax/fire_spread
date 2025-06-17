@@ -4,7 +4,7 @@
 #include "ignition_cells.hpp"
 #include "landscape.hpp"
 #include "many_simulations.hpp"
-#include "spread_functions.hpp"
+#include "spread_functions.cuh"
 
 #define DISTANCE 30.0f
 #define ELEVATION_MEAN 1163.3f
@@ -33,9 +33,7 @@ int main(int argc, char* argv[]) {
     IgnitionCells ignition_cells =
         read_ignition_cells(landscape_file_prefix + "-ignition_points.csv");
 
-    SimulationParams params = {
-      0.0f, 0.5f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f
-    };
+    SimulationParams params = { 0.0f, 0.5f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f, 0.2f };
 
     Matrix<size_t> burned_amounts = burned_amounts_per_cell(
         landscape, ignition_cells, params, DISTANCE, ELEVATION_MEAN, ELEVATION_SD, UPPER_LIMIT,
@@ -48,7 +46,7 @@ int main(int argc, char* argv[]) {
         if (j != 0) {
           std::cout << " ";
         }
-        std::cout << burned_amounts[{j, i}];
+        std::cout << burned_amounts[{ j, i }];
       }
       std::cout << std::endl;
     }

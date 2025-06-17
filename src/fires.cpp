@@ -50,9 +50,10 @@ FireStats get_fire_stats(const Fire& fire, const Landscape& landscape) {
   size_t local_wet = 0;
   size_t local_dry = 0;
 
-  // The loop iterates over burned_ids, which can be done in parallel.
-  // landscape is read-only.
-  #pragma omp parallel for reduction(+:local_matorral, local_subalpine, local_wet, local_dry) schedule(static)
+// The loop iterates over burned_ids, which can be done in parallel.
+// landscape is read-only.
+#pragma omp parallel for reduction(+ : local_matorral, local_subalpine, local_wet, local_dry)  \
+    schedule(static)
   for (size_t i = 0; i < fire.burned_ids.size(); ++i) {
     const auto& coord = fire.burned_ids[i];
     // Accessing landscape is const, so it's thread-safe for reading.

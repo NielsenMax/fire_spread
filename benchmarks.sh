@@ -18,7 +18,7 @@ for data in "${dataArr[@]}"; do
     csv_output="results/benchmark_${data_filename%.*}.csv"
     
     # Build hyperfine command for this data file
-    HYPERFINE_CMD="OMP_NUM_THREADS=4 hyperfine --warmup 3 --export-csv $csv_output"
+    HYPERFINE_CMD="OMP_NUM_THREADS=1 hyperfine --warmup 3 --export-csv $csv_output"
     
     # Add each binary in the binaries directory
     for binary in ./binaries/*; do
